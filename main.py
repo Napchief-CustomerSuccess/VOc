@@ -1,5 +1,6 @@
 import time
-from fastapi import FastAPI, Request, HTTPException
+import threading
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional
@@ -8,6 +9,8 @@ from exotel_client import initiate_call, get_call_details
 from sheets import get_pending_numbers, mark_dialed
 
 app = FastAPI(title="Exotel Dialer")
+
+dialer_state = {"running": False, "current_phone": None, "progress": []}
 
 
 # ── Health ───────────────────────────────────────────────────────────
@@ -24,32 +27,78 @@ class DialResponse(BaseModel):
     results: list
 
 
+def wait_for_call_to_finish(call_sid: str, timeout: int = 300):
+    """Poll Exotel until the call is completed/failed/no-answer."""
+    terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled"}
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            details = get_call_details(call_sid)
+            status = details.get("Call", {}).get("Status", "").lower()
+            if status in terminal_statuses:
+                return status
+        except Exception:
+            pass
+        time.sleep(5)
+    return "timeout"
+
+
+def dial_sequentially(pending):
+    """Background worker: dial one number at a time, wait for each call to finish."""
+    dialer_state["running"] = True
+    dialer_state["progress"] = []
+
+    for row_idx, phone in pending:
+        dialer_state["current_phone"] = phone
+        try:
+            resp = initiate_call(phone)
+            call_sid = resp.get("Call", {}).get("Sid", "unknown")
+            mark_dialed(row_idx, call_sid)
+            print(f"[dial] calling {phone}, call_sid={call_sid} — waiting for call to finish...")
+            final_status = wait_for_call_to_finish(call_sid)
+            print(f"[dial] {phone} finished with status: {final_status}")
+            dialer_state["progress"].append({"phone": phone, "status": final_status, "call_sid": call_sid})
+        except Exception as e:
+            print(f"[dial] {phone} error: {e}")
+            dialer_state["progress"].append({"phone": phone, "status": "error", "error": str(e)})
+        time.sleep(2)
+
+    dialer_state["running"] = False
+    dialer_state["current_phone"] = None
+    print(f"[dial] all done. {len(dialer_state['progress'])} calls processed.")
+
+
 @app.api_route("/dial", methods=["GET", "POST"])
-def dial_numbers(delay: float = 1.0):
-    """Read Google Sheet, dial every pending number via Exotel."""
+def dial_numbers(background_tasks: BackgroundTasks):
+    """Read Google Sheet, dial numbers one at a time — each call waits for the previous to finish."""
+    if dialer_state["running"]:
+        return {
+            "status": "already_running",
+            "current_phone": dialer_state["current_phone"],
+            "completed": len(dialer_state["progress"]),
+        }
+
     try:
         pending = get_pending_numbers()
-        results = []
-        dialed = 0
-        errors = 0
+        if not pending:
+            return {"status": "no_pending_numbers", "total": 0}
 
-        for row_idx, phone in pending:
-            try:
-                resp = initiate_call(phone)
-                call_sid = resp.get("Call", {}).get("Sid", "unknown")
-                mark_dialed(row_idx, call_sid)
-                results.append({"phone": phone, "status": "dialed", "call_sid": call_sid})
-                dialed += 1
-            except Exception as e:
-                results.append({"phone": phone, "status": "error", "error": str(e)})
-                errors += 1
-            time.sleep(delay)
-
-        return DialResponse(total=len(pending), dialed=dialed, errors=errors, results=results)
+        background_tasks.add_task(dial_sequentially, pending)
+        return {"status": "started", "total": len(pending), "message": "Dialing one at a time. Check /dial-status for progress."}
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
         raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}\n\nTraceback:\n{error_details}")
+
+
+@app.get("/dial-status")
+def dial_status():
+    return {
+        "running": dialer_state["running"],
+        "current_phone": dialer_state["current_phone"],
+        "completed": len(dialer_state["progress"]),
+        "results": dialer_state["progress"],
+    }
 
 
 # ── Dial a single number ─────────────────────────────────────────────
