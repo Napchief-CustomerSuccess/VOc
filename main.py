@@ -14,6 +14,9 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
 dialer_state = {"running": False, "current_phone": None, "progress": [], "auto_poll": True}
 
+# Track what digit each caller pressed: call_sid -> "1", "2", etc.
+call_actions = {}
+
 
 def auto_poll_loop():
     """Background thread: check the Sheet every POLL_INTERVAL seconds and dial new numbers."""
@@ -90,9 +93,24 @@ def dial_sequentially(pending):
             mark_dialed(row_idx, call_sid)
             print(f"[dial] calling {phone}, call_sid={call_sid} — waiting for call to finish...")
             final_status = wait_for_call_to_finish(call_sid)
-            print(f"[dial] {phone} finished with status: {final_status}")
-            mark_call_result(row_idx, final_status)
-            dialer_state["progress"].append({"phone": phone, "status": final_status, "call_sid": call_sid})
+            action = call_actions.pop(call_sid, None)
+            if action == "1":
+                display_status = "completed"
+            elif action == "2":
+                display_status = "rescheduled"
+            elif final_status == "no-answer":
+                display_status = "no-answer"
+            elif final_status == "busy":
+                display_status = "busy"
+            elif final_status == "failed":
+                display_status = "failed"
+            elif final_status == "completed" and action is None:
+                display_status = "no-response"
+            else:
+                display_status = final_status
+            print(f"[dial] {phone} finished: exotel={final_status}, action={action}, sheet={display_status}")
+            mark_call_result(row_idx, display_status)
+            dialer_state["progress"].append({"phone": phone, "status": display_status, "call_sid": call_sid})
         except Exception as e:
             print(f"[dial] {phone} error: {e}")
             mark_call_result(row_idx, f"error: {e}")
@@ -176,7 +194,29 @@ async def passthru(request: Request):
           f"dir={direction} digits={digits} status={call_status}")
 
     # Return 200 — Exotel continues the flow.
-    # If you need to branch based on digits or status, add logic here.
+    return JSONResponse({"status": "ok"})
+
+
+# ── Track customer action (press 1 = connected, press 2 = rescheduled) ──
+@app.api_route("/exotel/pressed1", methods=["GET", "POST"])
+async def pressed1(request: Request):
+    """Exotel hits this when customer presses 1 (Connect)."""
+    data = dict(await request.form()) if "form" in request.headers.get("content-type", "") else {}
+    call_sid = data.get("CallSid", request.query_params.get("CallSid", ""))
+    if call_sid:
+        call_actions[call_sid] = "1"
+        print(f"[pressed1] {call_sid} — customer pressed 1 (connect)")
+    return JSONResponse({"status": "ok"})
+
+
+@app.api_route("/exotel/pressed2", methods=["GET", "POST"])
+async def pressed2(request: Request):
+    """Exotel hits this when customer presses 2 (Rescheduled)."""
+    data = dict(await request.form()) if "form" in request.headers.get("content-type", "") else {}
+    call_sid = data.get("CallSid", request.query_params.get("CallSid", ""))
+    if call_sid:
+        call_actions[call_sid] = "2"
+        print(f"[pressed2] {call_sid} — customer pressed 2 (reschedule)")
     return JSONResponse({"status": "ok"})
 
 
