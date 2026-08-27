@@ -1,5 +1,7 @@
+import os
 import time
 import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -8,15 +10,43 @@ from typing import Optional
 from exotel_client import initiate_call, get_call_details
 from sheets import get_pending_numbers, mark_dialed
 
-app = FastAPI(title="Exotel Dialer")
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "120"))
 
-dialer_state = {"running": False, "current_phone": None, "progress": []}
+dialer_state = {"running": False, "current_phone": None, "progress": [], "auto_poll": True}
+
+
+def auto_poll_loop():
+    """Background thread: check the Sheet every POLL_INTERVAL seconds and dial new numbers."""
+    print(f"[auto-poll] started, checking every {POLL_INTERVAL}s")
+    while dialer_state["auto_poll"]:
+        try:
+            if not dialer_state["running"]:
+                pending = get_pending_numbers()
+                if pending:
+                    print(f"[auto-poll] found {len(pending)} new numbers, starting dialer...")
+                    dial_sequentially(pending)
+                else:
+                    print("[auto-poll] no pending numbers")
+        except Exception as e:
+            print(f"[auto-poll] error: {e}")
+        time.sleep(POLL_INTERVAL)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    poll_thread = threading.Thread(target=auto_poll_loop, daemon=True)
+    poll_thread.start()
+    yield
+    dialer_state["auto_poll"] = False
+
+
+app = FastAPI(title="Exotel Dialer", lifespan=lifespan)
 
 
 # ── Health ───────────────────────────────────────────────────────────
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "exotel-dialer"}
+    return {"status": "ok", "service": "exotel-dialer", "auto_poll": dialer_state["auto_poll"]}
 
 
 # ── Dial all pending numbers from Google Sheet ───────────────────────
