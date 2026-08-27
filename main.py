@@ -24,27 +24,32 @@ class DialResponse(BaseModel):
     results: list
 
 
-@app.api_route("/dial", methods=["GET", "POST"], response_model=DialResponse)
+@app.api_route("/dial", methods=["GET", "POST"])
 def dial_numbers(delay: float = 1.0):
     """Read Google Sheet, dial every pending number via Exotel."""
-    pending = get_pending_numbers()
-    results = []
-    dialed = 0
-    errors = 0
+    try:
+        pending = get_pending_numbers()
+        results = []
+        dialed = 0
+        errors = 0
 
-    for row_idx, phone in pending:
-        try:
-            resp = initiate_call(phone)
-            call_sid = resp.get("Call", {}).get("Sid", "unknown")
-            mark_dialed(row_idx, call_sid)
-            results.append({"phone": phone, "status": "dialed", "call_sid": call_sid})
-            dialed += 1
-        except Exception as e:
-            results.append({"phone": phone, "status": "error", "error": str(e)})
-            errors += 1
-        time.sleep(delay)
+        for row_idx, phone in pending:
+            try:
+                resp = initiate_call(phone)
+                call_sid = resp.get("Call", {}).get("Sid", "unknown")
+                mark_dialed(row_idx, call_sid)
+                results.append({"phone": phone, "status": "dialed", "call_sid": call_sid})
+                dialed += 1
+            except Exception as e:
+                results.append({"phone": phone, "status": "error", "error": str(e)})
+                errors += 1
+            time.sleep(delay)
 
-    return DialResponse(total=len(pending), dialed=dialed, errors=errors, results=results)
+        return DialResponse(total=len(pending), dialed=dialed, errors=errors, results=results)
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}\n\nTraceback:\n{error_details}")
 
 
 # ── Dial a single number ─────────────────────────────────────────────
