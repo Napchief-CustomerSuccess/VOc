@@ -10,7 +10,7 @@ from typing import Optional
 from exotel_client import initiate_call, get_call_details
 from sheets import get_pending_numbers, mark_dialed, mark_call_result, ensure_headers
 
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "120"))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
 dialer_state = {"running": False, "current_phone": None, "progress": [], "auto_poll": True}
 
