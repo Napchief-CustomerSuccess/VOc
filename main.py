@@ -24,7 +24,7 @@ class DialResponse(BaseModel):
     results: list
 
 
-@app.post("/dial", response_model=DialResponse)
+@app.api_route("/dial", methods=["GET", "POST"], response_model=DialResponse)
 def dial_numbers(delay: float = 1.0):
     """Read Google Sheet, dial every pending number via Exotel."""
     pending = get_pending_numbers()
