@@ -61,7 +61,7 @@ class DialResponse(BaseModel):
     results: list
 
 
-def wait_for_call_to_finish(call_sid: str, timeout: int = 300):
+def wait_for_call_to_finish(call_sid: str, timeout: int = 7200):
     """Poll Exotel until the call is completed/failed/no-answer."""
     terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled"}
     start = time.time()
