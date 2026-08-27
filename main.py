@@ -73,7 +73,7 @@ def wait_for_call_to_finish(call_sid: str, timeout: int = 300):
                 return status
         except Exception:
             pass
-        time.sleep(5)
+        time.sleep(2)
     return "timeout"
 
 
@@ -97,7 +97,6 @@ def dial_sequentially(pending):
             print(f"[dial] {phone} error: {e}")
             mark_call_result(row_idx, f"error: {e}")
             dialer_state["progress"].append({"phone": phone, "status": "error", "error": str(e)})
-        time.sleep(2)
 
     dialer_state["running"] = False
     dialer_state["current_phone"] = None
