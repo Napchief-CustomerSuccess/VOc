@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from exotel_client import initiate_call, get_call_details
-from sheets import get_pending_numbers, mark_dialed
+from sheets import get_pending_numbers, mark_dialed, mark_call_result, ensure_headers
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "120"))
 
@@ -17,6 +17,10 @@ dialer_state = {"running": False, "current_phone": None, "progress": [], "auto_p
 
 def auto_poll_loop():
     """Background thread: check the Sheet every POLL_INTERVAL seconds and dial new numbers."""
+    try:
+        ensure_headers()
+    except Exception:
+        pass
     print(f"[auto-poll] started, checking every {POLL_INTERVAL}s")
     while dialer_state["auto_poll"]:
         try:
@@ -87,9 +91,11 @@ def dial_sequentially(pending):
             print(f"[dial] calling {phone}, call_sid={call_sid} — waiting for call to finish...")
             final_status = wait_for_call_to_finish(call_sid)
             print(f"[dial] {phone} finished with status: {final_status}")
+            mark_call_result(row_idx, final_status)
             dialer_state["progress"].append({"phone": phone, "status": final_status, "call_sid": call_sid})
         except Exception as e:
             print(f"[dial] {phone} error: {e}")
+            mark_call_result(row_idx, f"error: {e}")
             dialer_state["progress"].append({"phone": phone, "status": "error", "error": str(e)})
         time.sleep(2)
 
