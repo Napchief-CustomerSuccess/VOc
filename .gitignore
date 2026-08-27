@@ -1,5 +1,9 @@
 .env
+.env.example
 credentials.json
+voc123-506810-303dc2527b9d.json
+*.json
 __pycache__/
 myenv/
 *.pyc
+.DS_Store
