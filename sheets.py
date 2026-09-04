@@ -16,8 +16,8 @@ IST = pytz.timezone("Asia/Kolkata")
 
 HEADERS = ["Phone", "Status", "Call SID", "Call Status", "Date", "Time", "Month", "Attempts", "Last Attempt"]
 
-# Retry intervals in minutes: after attempt 1 wait 30m, after 2 wait 60m, after 3 wait 90m, after 4 wait 120m
-RETRY_INTERVALS = {1: 30, 2: 60, 3: 90, 4: 120}
+# Retry intervals in minutes: after attempt 1 wait 10m, after 2 wait 60m, after 3 wait 90m, after 4 wait 120m
+RETRY_INTERVALS = {1: 10, 2: 60, 3: 90, 4: 120}
 MAX_ATTEMPTS = 5
 
 
