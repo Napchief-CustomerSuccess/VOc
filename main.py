@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from exotel_client import initiate_call, get_call_details
-from sheets import get_pending_numbers, mark_dialed, mark_call_result, ensure_headers
+from sheets import get_pending_numbers, get_retry_numbers, mark_dialed, mark_call_result, ensure_headers
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
@@ -32,8 +32,11 @@ def auto_poll_loop():
                 if pending:
                     print(f"[auto-poll] found {len(pending)} new numbers, starting dialer...")
                     dial_sequentially(pending)
-                else:
-                    print("[auto-poll] no pending numbers")
+                elif not dialer_state["running"]:
+                    retries = get_retry_numbers()
+                    if retries:
+                        print(f"[auto-poll] found {len(retries)} numbers to retry...")
+                        dial_sequentially(retries)
         except Exception as e:
             print(f"[auto-poll] error: {e}")
         time.sleep(POLL_INTERVAL)
@@ -133,11 +136,13 @@ def dial_numbers(background_tasks: BackgroundTasks):
 
     try:
         pending = get_pending_numbers()
-        if not pending:
-            return {"status": "no_pending_numbers", "total": 0}
+        retries = get_retry_numbers()
+        all_numbers = pending + retries
+        if not all_numbers:
+            return {"status": "no_pending_numbers", "total": 0, "new": 0, "retries": 0}
 
-        background_tasks.add_task(dial_sequentially, pending)
-        return {"status": "started", "total": len(pending), "message": "Dialing one at a time. Check /dial-status for progress."}
+        background_tasks.add_task(dial_sequentially, all_numbers)
+        return {"status": "started", "total": len(all_numbers), "new": len(pending), "retries": len(retries), "message": "Dialing one at a time. Check /dial-status for progress."}
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
