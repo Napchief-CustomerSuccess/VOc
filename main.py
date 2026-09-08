@@ -129,6 +129,8 @@ def dial_sequentially(pending):
             mark_call_result(row_idx, f"error: {e}")
             dialer_state["progress"].append({"phone": phone, "status": "error", "error": str(e)})
 
+        time.sleep(5)
+
     dialer_state["running"] = False
     dialer_state["current_phone"] = None
     print(f"[dial] all done. {len(dialer_state['progress'])} calls processed.")
