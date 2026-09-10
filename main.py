@@ -100,6 +100,14 @@ def dial_sequentially(pending):
 
     for row_idx, phone in pending:
         dialer_state["current_phone"] = phone
+
+        clean = phone.replace("+", "").replace(" ", "").replace("-", "")
+        if not clean.isdigit() or len(clean) < 10 or len(clean) > 13 or "E" in phone or "e" in phone:
+            print(f"[dial] skipping invalid number: {phone}")
+            mark_call_result(row_idx, "failed")
+            dialer_state["progress"].append({"phone": phone, "status": "invalid", "call_sid": "none"})
+            continue
+
         try:
             resp = initiate_call(phone)
             call_sid = resp.get("Call", {}).get("Sid", "unknown")
