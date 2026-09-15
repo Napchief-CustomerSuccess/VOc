@@ -191,22 +191,23 @@ def dial_one(phone: str):
 
 
 # ── Exotel Passthru webhook ─────────────────────────────────────────
-@app.post("/exotel/passthru")
+@app.api_route("/exotel/passthru", methods=["GET", "POST"])
 async def passthru(request: Request):
     """Exotel Passthru applet hits this endpoint.
 
-    Receives form data with call details:
-      - CallSid, CallFrom, CallTo, CallStatus,
-      - Direction, digits (if gather was used), etc.
-
-    Return plain text or JSON — Exotel Passthru expects an HTTP 200
-    with optional response body to control the next applet.
+    Exotel sends GET by default (params in query string) but form/JSON
+    POST is also supported.
     """
     content_type = request.headers.get("content-type", "")
-    if "form" in content_type:
-        data = dict(await request.form())
+    if request.method == "POST":
+        if "form" in content_type:
+            data = dict(await request.form())
+        elif await request.body():
+            data = await request.json()
+        else:
+            data = {}
     else:
-        data = await request.json() if await request.body() else {}
+        data = dict(request.query_params)
 
     call_sid = data.get("CallSid", "")
     call_from = data.get("CallFrom", "")
@@ -218,7 +219,6 @@ async def passthru(request: Request):
     print(f"[passthru] sid={call_sid} from={call_from} to={call_to} "
           f"dir={direction} digits={digits} status={call_status}")
 
-    # Return 200 — Exotel continues the flow.
     return JSONResponse({"status": "ok"})
 
 
@@ -246,13 +246,18 @@ async def pressed2(request: Request):
 
 
 # ── Call status callback (optional — set in Exotel flow) ─────────────
-@app.post("/exotel/status")
+@app.api_route("/exotel/status", methods=["GET", "POST"])
 async def status_callback(request: Request):
     content_type = request.headers.get("content-type", "")
-    if "form" in content_type:
-        data = dict(await request.form())
+    if request.method == "POST":
+        if "form" in content_type:
+            data = dict(await request.form())
+        elif await request.body():
+            data = await request.json()
+        else:
+            data = {}
     else:
-        data = await request.json() if await request.body() else {}
+        data = dict(request.query_params)
 
     print(f"[status] {data}")
     return {"status": "received"}
