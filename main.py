@@ -67,10 +67,11 @@ class DialResponse(BaseModel):
     results: list
 
 
-def wait_for_call_to_finish(call_sid: str, timeout: int = 7200):
-    """Poll Exotel until the call is completed/failed/no-answer."""
+def wait_for_call_to_finish(call_sid: str, timeout: int = 600):
+    """Poll Exotel until the call reaches a terminal state, max 10 minutes."""
     terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled"}
     unknown_count = 0
+    in_progress_start = None
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -78,7 +79,14 @@ def wait_for_call_to_finish(call_sid: str, timeout: int = 7200):
             status = details.get("Call", {}).get("Status", "").lower()
             if status in terminal_statuses:
                 return status
-            if status in ("", "unknown") or not status:
+            if status == "in-progress":
+                if in_progress_start is None:
+                    in_progress_start = time.time()
+                elif time.time() - in_progress_start > 480:
+                    print(f"[wait] {call_sid} stuck in-progress for 8 min, giving up")
+                    return "failed"
+                unknown_count = 0
+            elif status in ("", "unknown") or not status:
                 unknown_count += 1
                 if unknown_count >= 30:
                     print(f"[wait] {call_sid} stuck with unknown status for 60s, marking as failed")
