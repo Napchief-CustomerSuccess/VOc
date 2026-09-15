@@ -7,12 +7,19 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional
 
-from exotel_client import initiate_call, get_call_details
+from exotel_client import initiate_call, get_call_details, hangup_call
 from sheets import get_pending_numbers, get_retry_numbers, mark_dialed, mark_call_result, ensure_headers
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+WATCHDOG_MAX_CALL_MINUTES = int(os.getenv("WATCHDOG_MAX_CALL_MINUTES", "12"))
 
-dialer_state = {"running": False, "current_phone": None, "progress": [], "auto_poll": True}
+dialer_state = {
+    "running": False,
+    "current_phone": None,
+    "current_started_at": None,
+    "progress": [],
+    "auto_poll": True,
+}
 
 # Track what digit each caller pressed: call_sid -> "1", "2", etc.
 call_actions = {}
@@ -22,8 +29,8 @@ def auto_poll_loop():
     """Background thread: check the Sheet every POLL_INTERVAL seconds and dial new numbers."""
     try:
         ensure_headers()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[auto-poll] ensure_headers failed: {e}")
     print(f"[auto-poll] started, checking every {POLL_INTERVAL}s")
     while dialer_state["auto_poll"]:
         try:
@@ -42,10 +49,37 @@ def auto_poll_loop():
         time.sleep(POLL_INTERVAL)
 
 
+def watchdog_loop():
+    """Background thread: force-reset dialer state if a single call runs too long.
+
+    Belt-and-suspenders safety net. wait_for_call_to_finish already caps each
+    call at 10 min, but if the thread ever hangs elsewhere (network stall,
+    Sheets API hang, unexpected exception), this ensures the queue never
+    stays locked for more than WATCHDOG_MAX_CALL_MINUTES on one number.
+    """
+    print(f"[watchdog] started, max per-call = {WATCHDOG_MAX_CALL_MINUTES} min")
+    while dialer_state["auto_poll"]:
+        time.sleep(60)
+        try:
+            started_at = dialer_state.get("current_started_at")
+            phone = dialer_state.get("current_phone")
+            if dialer_state["running"] and started_at and phone:
+                elapsed_min = (time.time() - started_at) / 60
+                if elapsed_min > WATCHDOG_MAX_CALL_MINUTES:
+                    print(f"[watchdog] {phone} has been current for {elapsed_min:.1f} min — force-releasing state")
+                    dialer_state["running"] = False
+                    dialer_state["current_phone"] = None
+                    dialer_state["current_started_at"] = None
+        except Exception as e:
+            print(f"[watchdog] error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app):
     poll_thread = threading.Thread(target=auto_poll_loop, daemon=True)
     poll_thread.start()
+    watchdog_thread = threading.Thread(target=watchdog_loop, daemon=True)
+    watchdog_thread.start()
     yield
     dialer_state["auto_poll"] = False
 
@@ -68,7 +102,11 @@ class DialResponse(BaseModel):
 
 
 def wait_for_call_to_finish(call_sid: str, timeout: int = 600):
-    """Poll Exotel until the call reaches a terminal state, max 10 minutes."""
+    """Poll Exotel until the call reaches a terminal state, max 10 minutes.
+
+    If stuck in-progress > 8 min (voicemail, fax line, silent line that
+    never hangs up), actively tell Exotel to hang up so the queue moves on.
+    """
     terminal_statuses = {"completed", "failed", "busy", "no-answer", "canceled"}
     unknown_count = 0
     in_progress_start = None
@@ -83,7 +121,11 @@ def wait_for_call_to_finish(call_sid: str, timeout: int = 600):
                 if in_progress_start is None:
                     in_progress_start = time.time()
                 elif time.time() - in_progress_start > 480:
-                    print(f"[wait] {call_sid} stuck in-progress for 8 min, giving up")
+                    print(f"[wait] {call_sid} stuck in-progress for 8 min, hanging up")
+                    try:
+                        hangup_call(call_sid)
+                    except Exception as e:
+                        print(f"[wait] hangup failed: {e}")
                     return "failed"
                 unknown_count = 0
             elif status in ("", "unknown") or not status:
@@ -98,6 +140,11 @@ def wait_for_call_to_finish(call_sid: str, timeout: int = 600):
             if unknown_count >= 30:
                 return "failed"
         time.sleep(2)
+    print(f"[wait] {call_sid} hit 10-min hard timeout, hanging up")
+    try:
+        hangup_call(call_sid)
+    except Exception as e:
+        print(f"[wait] hangup failed: {e}")
     return "timeout"
 
 
@@ -106,50 +153,62 @@ def dial_sequentially(pending):
     dialer_state["running"] = True
     dialer_state["progress"] = []
 
-    for row_idx, phone in pending:
-        dialer_state["current_phone"] = phone
+    try:
+        for row_idx, phone in pending:
+            dialer_state["current_phone"] = phone
+            dialer_state["current_started_at"] = time.time()
 
-        clean = phone.replace("+", "").replace(" ", "").replace("-", "")
-        if not clean.isdigit() or len(clean) < 10 or len(clean) > 13 or "E" in phone or "e" in phone:
-            print(f"[dial] skipping invalid number: {phone}")
-            mark_call_result(row_idx, "failed")
-            dialer_state["progress"].append({"phone": phone, "status": "invalid", "call_sid": "none"})
-            continue
+            clean = phone.replace("+", "").replace(" ", "").replace("-", "")
+            if not clean.isdigit() or len(clean) < 10 or len(clean) > 13 or "E" in phone or "e" in phone:
+                print(f"[dial] skipping invalid number: {phone}")
+                try:
+                    mark_call_result(row_idx, "failed")
+                except Exception as e:
+                    print(f"[dial] mark_call_result failed for invalid {phone}: {e}")
+                dialer_state["progress"].append({"phone": phone, "status": "invalid", "call_sid": "none"})
+                continue
 
-        try:
-            resp = initiate_call(phone)
-            call_sid = resp.get("Call", {}).get("Sid", "unknown")
-            mark_dialed(row_idx, call_sid)
-            print(f"[dial] calling {phone}, call_sid={call_sid} — waiting for call to finish...")
-            final_status = wait_for_call_to_finish(call_sid)
-            action = call_actions.pop(call_sid, None)
-            if action == "1":
-                display_status = "completed"
-            elif action == "2":
-                display_status = "rescheduled"
-            elif final_status == "no-answer":
-                display_status = "no-answer"
-            elif final_status == "busy":
-                display_status = "busy"
-            elif final_status == "failed":
-                display_status = "failed"
-            elif final_status == "completed" and action is None:
-                display_status = "no-response"
-            else:
-                display_status = final_status
-            print(f"[dial] {phone} finished: exotel={final_status}, action={action}, sheet={display_status}")
-            mark_call_result(row_idx, display_status)
-            dialer_state["progress"].append({"phone": phone, "status": display_status, "call_sid": call_sid})
-        except Exception as e:
-            print(f"[dial] {phone} error: {e}")
-            mark_call_result(row_idx, f"error: {e}")
-            dialer_state["progress"].append({"phone": phone, "status": "error", "error": str(e)})
+            try:
+                resp = initiate_call(phone)
+                call_sid = resp.get("Call", {}).get("Sid", "unknown")
+                mark_dialed(row_idx, call_sid)
+                print(f"[dial] calling {phone}, call_sid={call_sid} — waiting for call to finish...")
+                final_status = wait_for_call_to_finish(call_sid)
+                action = call_actions.pop(call_sid, None)
+                if action == "1":
+                    display_status = "completed"
+                elif action == "2":
+                    display_status = "rescheduled"
+                elif final_status == "no-answer":
+                    display_status = "no-answer"
+                elif final_status == "busy":
+                    display_status = "busy"
+                elif final_status == "failed":
+                    display_status = "failed"
+                elif final_status == "completed" and action is None:
+                    display_status = "no-response"
+                else:
+                    display_status = final_status
+                print(f"[dial] {phone} finished: exotel={final_status}, action={action}, sheet={display_status}")
+                try:
+                    mark_call_result(row_idx, display_status)
+                except Exception as e:
+                    print(f"[dial] mark_call_result failed for {phone}: {e}")
+                dialer_state["progress"].append({"phone": phone, "status": display_status, "call_sid": call_sid})
+            except Exception as e:
+                print(f"[dial] {phone} error: {e}")
+                try:
+                    mark_call_result(row_idx, f"error: {e}")
+                except Exception as inner:
+                    print(f"[dial] mark_call_result failed on error path for {phone}: {inner}")
+                dialer_state["progress"].append({"phone": phone, "status": "error", "error": str(e)})
 
-        time.sleep(5)
-
-    dialer_state["running"] = False
-    dialer_state["current_phone"] = None
-    print(f"[dial] all done. {len(dialer_state['progress'])} calls processed.")
+            time.sleep(5)
+    finally:
+        dialer_state["running"] = False
+        dialer_state["current_phone"] = None
+        dialer_state["current_started_at"] = None
+        print(f"[dial] batch done. {len(dialer_state['progress'])} calls processed.")
 
 
 @app.api_route("/dial", methods=["GET", "POST"])
@@ -179,12 +238,27 @@ def dial_numbers(background_tasks: BackgroundTasks):
 
 @app.get("/dial-status")
 def dial_status():
+    started_at = dialer_state.get("current_started_at")
+    elapsed_sec = int(time.time() - started_at) if started_at else None
     return {
         "running": dialer_state["running"],
         "current_phone": dialer_state["current_phone"],
+        "current_elapsed_sec": elapsed_sec,
         "completed": len(dialer_state["progress"]),
         "results": dialer_state["progress"],
     }
+
+
+@app.api_route("/reset", methods=["GET", "POST"])
+def reset_dialer():
+    """Force-clear the dialer state. Use if a call is wedged and you don't want to redeploy."""
+    was_running = dialer_state["running"]
+    was_phone = dialer_state["current_phone"]
+    dialer_state["running"] = False
+    dialer_state["current_phone"] = None
+    dialer_state["current_started_at"] = None
+    print(f"[reset] cleared state (was running={was_running}, phone={was_phone})")
+    return {"status": "reset", "was_running": was_running, "was_phone": was_phone}
 
 
 # ── Dial a single number ─────────────────────────────────────────────

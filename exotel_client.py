@@ -41,3 +41,15 @@ def get_call_details(call_sid: str) -> dict:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def hangup_call(call_sid: str) -> dict:
+    """Force-terminate an in-progress call via Exotel."""
+    url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/{call_sid}.json"
+    resp = requests.delete(
+        url,
+        auth=(EXOTEL_API_KEY, EXOTEL_API_TOKEN),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json() if resp.text else {"status": "hangup_sent"}
